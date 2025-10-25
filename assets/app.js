@@ -1,6 +1,6 @@
 const queryParams = new URLSearchParams(window.location.search);
 const STREAM_BASE = (queryParams.get('signal')?.trim() || `${window.location.origin}/api/remoteview`).replace(/\/$/, '');
-const SESSION_TTL_MS = 60_000;
+const SESSION_TTL_MS = 120_000;
 
 const els = {
   sessionId: document.getElementById('sessionId'),
