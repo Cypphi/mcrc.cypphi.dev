@@ -1,8 +1,5 @@
-const SIGNALING_BASE = 'https://mcrc.cypphi.dev/api/remoteview';
-const DEFAULT_ICE_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:global.stun.twilio.com:3478' }
-];
+const queryParams = new URLSearchParams(window.location.search);
+const STREAM_BASE = (queryParams.get('signal')?.trim() || `${window.location.origin}/api/remoteview`).replace(/\/$/, '');
 const SESSION_TTL_MS = 60_000;
 
 const els = {
@@ -13,7 +10,7 @@ const els = {
   hint: document.getElementById('hintText'),
   connectBtn: document.getElementById('connectBtn'),
   disconnectBtn: document.getElementById('disconnectBtn'),
-  video: document.getElementById('remoteVideo'),
+  stream: document.getElementById('remoteStream'),
   videoOverlay: document.getElementById('videoOverlay'),
 };
 
@@ -22,106 +19,17 @@ const state = {
   authToken: null,
   expiresAt: null,
   countdownTimer: null,
+  streamBase: STREAM_BASE,
+  currentStreamUrl: null,
+  connected: false,
+  disconnecting: false,
 };
 
-class RemoteViewClient {
-  constructor(videoEl) {
-    this.videoEl = videoEl;
-    this.peer = null;
-    this.pendingCandidates = [];
-  }
-
-  async connect({ sessionId, authToken }) {
-    this.disconnect();
-    this.peer = new RTCPeerConnection({ iceServers: DEFAULT_ICE_SERVERS });
-    this.peer.addEventListener('track', event => {
-      if (event.streams?.length) {
-        this.videoEl.srcObject = event.streams[0];
-      }
-    });
-    this.peer.addEventListener('connectionstatechange', () => {
-      console.debug('[RemoteView] connection state', this.peer.connectionState);
-    });
-
-    const offerPayload = await requestOffer(sessionId, authToken);
-    if (!offerPayload?.offer) {
-      throw new Error('Missing SDP offer from signaling server.');
-    }
-
-    const iceServers = normalizeIceServers(offerPayload.iceServers) || DEFAULT_ICE_SERVERS;
-    this.peer.setConfiguration({ iceServers });
-
-    await this.peer.setRemoteDescription(new RTCSessionDescription(offerPayload.offer));
-    const answer = await this.peer.createAnswer();
-    await this.peer.setLocalDescription(answer);
-
-    await sendAnswer(sessionId, authToken, answer);
-  }
-
-  disconnect() {
-    if (this.peer) {
-      this.peer.ontrack = null;
-      this.peer.getSenders().forEach(sender => sender.track?.stop());
-      this.peer.close();
-      this.peer = null;
-      this.videoEl.srcObject = null;
-    }
-  }
-}
-
-async function requestOffer(sessionId, authToken) {
-  const response = await fetch(`${SIGNALING_BASE}/offer`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessionId, authToken }),
-  });
-
-  if (!response.ok) {
-    const message = await safeJson(response);
-    throw new Error(message?.error || 'Failed to request offer');
-  }
-
-  return response.json();
-}
-
-async function sendAnswer(sessionId, authToken, answer) {
-  const response = await fetch(`${SIGNALING_BASE}/answer`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessionId, authToken, answer }),
-  });
-
-  if (!response.ok) {
-    const message = await safeJson(response);
-    throw new Error(message?.error || 'Failed to send answer');
-  }
-}
-
-async function safeJson(response) {
-  try {
-    return await response.json();
-  } catch (err) {
-    return null;
-  }
-}
-
-function normalizeIceServers(servers) {
-  if (!Array.isArray(servers) || !servers.length) {
-    return null;
-  }
-  return servers.map(entry =>
-    typeof entry === 'string'
-      ? { urls: entry }
-      : entry
-  );
-}
-
 function parseInitialState() {
-  const params = new URLSearchParams(window.location.search);
-  state.sessionId = params.get('session')?.trim() || null;
-  state.authToken = params.get('auth')?.trim() || null;
+  state.sessionId = queryParams.get('session')?.trim() || null;
+  state.authToken = queryParams.get('auth')?.trim() || null;
 
-  const expiresParam = params.get('expires');
+  const expiresParam = queryParams.get('expires');
   if (expiresParam) {
     const parsed = Number(expiresParam);
     state.expiresAt = Number.isFinite(parsed) && parsed > Date.now()
@@ -139,16 +47,19 @@ function updateUiState() {
   els.authToken.textContent = state.authToken ? maskToken(state.authToken) : '—';
 
   const ready = Boolean(state.sessionId && state.authToken);
-  els.connectBtn.disabled = !ready;
+  els.connectBtn.disabled = !ready || state.expiresAt <= Date.now();
+  els.disconnectBtn.disabled = !state.connected;
   els.hint.textContent = ready
-    ? 'Ready to connect. Links expire automatically after one minute.'
+    ? 'Ready to connect. Make sure you can reach the host over LAN or VPN.'
     : 'Paste a valid Remote View link (with session + auth) to begin.';
 
   updateCountdown();
 }
 
 function maskToken(token) {
-  if (token.length <= 6) return token;
+  if (!token || token.length <= 6) {
+    return token || '';
+  }
   return `${token.slice(0, 3)}•••${token.slice(-3)}`;
 }
 
@@ -157,58 +68,107 @@ function updateCountdown() {
     clearInterval(state.countdownTimer);
   }
 
-  const update = () => {
+  const tick = () => {
     const remaining = Math.max(0, state.expiresAt - Date.now());
     const seconds = Math.ceil(remaining / 1000);
     els.expiresIn.textContent = `${seconds}s`;
+
     if (remaining <= 0) {
       els.connectBtn.disabled = true;
-      els.status.textContent = 'Link expired – request a fresh /remoteview link.';
+      if (!state.connected) {
+        setStatus('Link expired – request a fresh /remoteview link.');
+      }
       clearInterval(state.countdownTimer);
     }
   };
 
-  update();
-  state.countdownTimer = setInterval(update, 1000);
+  tick();
+  state.countdownTimer = setInterval(tick, 1000);
 }
 
-const client = new RemoteViewClient(els.video);
-
-els.connectBtn.addEventListener('click', async () => {
+function startStream() {
   if (!state.sessionId || !state.authToken) {
     return;
   }
 
-  setStatus('Requesting offer…');
+  state.disconnecting = false;
+  state.connected = false;
+
+  const streamUrl = `${state.streamBase}/stream?session=${encodeURIComponent(state.sessionId)}&auth=${encodeURIComponent(state.authToken)}`;
+  state.currentStreamUrl = streamUrl;
+
+  els.videoOverlay.style.display = 'flex';
+  els.videoOverlay.textContent = 'Connecting…';
+  setStatus('Connecting to stream…');
+
   els.connectBtn.disabled = true;
   els.disconnectBtn.disabled = false;
-  els.videoOverlay.textContent = 'Connecting…';
-  try {
-    await client.connect({ sessionId: state.sessionId, authToken: state.authToken });
-    setStatus('Connected');
-    els.videoOverlay.textContent = '';
-    els.videoOverlay.style.display = 'none';
-  } catch (err) {
-    console.error(err);
-    setStatus(err.message || 'Failed to connect');
-    els.connectBtn.disabled = false;
-    els.disconnectBtn.disabled = true;
-    els.videoOverlay.style.display = 'flex';
-    els.videoOverlay.textContent = 'Failed – check console';
-  }
-});
 
-els.disconnectBtn.addEventListener('click', () => {
-  client.disconnect();
-  setStatus('Disconnected');
-  els.disconnectBtn.disabled = true;
-  els.connectBtn.disabled = state.expiresAt <= Date.now();
+  els.stream.src = streamUrl;
+}
+
+function stopStream() {
+  state.disconnecting = true;
+  state.connected = false;
+  state.currentStreamUrl = null;
+
+  els.stream.removeAttribute('src');
+  els.stream.src = '';
   els.videoOverlay.style.display = 'flex';
   els.videoOverlay.textContent = 'Waiting for stream…';
-});
+
+  els.disconnectBtn.disabled = true;
+}
 
 function setStatus(text) {
   els.status.textContent = text;
 }
 
+els.stream.addEventListener('load', () => {
+  if (!state.currentStreamUrl) {
+    return;
+  }
+
+  state.connected = true;
+  els.connectBtn.disabled = true;
+  els.disconnectBtn.disabled = false;
+  els.videoOverlay.style.display = 'none';
+  setStatus('Streaming');
+});
+
+els.stream.addEventListener('error', () => {
+  if (state.disconnecting) {
+    return;
+  }
+
+  state.connected = false;
+  state.currentStreamUrl = null;
+  els.connectBtn.disabled = state.expiresAt <= Date.now();
+  els.disconnectBtn.disabled = true;
+  els.videoOverlay.style.display = 'flex';
+  els.videoOverlay.textContent = 'Failed – check connectivity';
+  setStatus('Failed to connect – ensure the host is reachable.');
+});
+
+els.connectBtn.addEventListener('click', () => {
+  if (!state.sessionId || !state.authToken) {
+    return;
+  }
+  startStream();
+});
+
+els.disconnectBtn.addEventListener('click', () => {
+  stopStream();
+  setStatus('Disconnected');
+  els.disconnectBtn.disabled = true;
+  els.connectBtn.disabled = state.expiresAt <= Date.now();
+});
+
+window.addEventListener('beforeunload', () => {
+  if (state.connected) {
+    stopStream();
+  }
+});
+
 parseInitialState();
+setStatus(state.sessionId && state.authToken ? 'Ready' : 'Awaiting parameters…');

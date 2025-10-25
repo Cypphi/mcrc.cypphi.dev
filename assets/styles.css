@@ -144,11 +144,12 @@ button.secondary {
   min-height: 220px;
 }
 
-video {
+.video-wrapper img {
   width: 100%;
   height: 100%;
   display: block;
   background: #000;
+  object-fit: contain;
 }
 
 .video-overlay {
