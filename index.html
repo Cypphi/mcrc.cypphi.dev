@@ -25,7 +25,7 @@
         </div>
         <div>
           <dt>Expires In</dt>
-          <dd id="expiresIn">60s</dd>
+          <dd id="expiresIn">120s</dd>
         </div>
         <div>
           <dt>Auth Token</dt>
@@ -50,14 +50,14 @@
         <img id="remoteStream" alt="Remote View stream" />
         <div class="video-overlay" id="videoOverlay">Waiting for stream…</div>
       </div>
-      <div class="note">Video stays on your network and streams as MJPEG over HTTPS. Ensure the host is reachable on LAN or a VPN like Tailscale.</div>
+      <div class="note">Video stays on your network and streams as MJPEG over HTTP. Ensure this device can reach the host over LAN or a VPN like Tailscale.</div>
     </section>
 
     <section class="card info-card">
       <h2>How it works</h2>
       <ol>
-        <li>The Minecraft client owner shares an ephemeral link that expires in one minute.</li>
-        <li>This page validates the link and opens a direct MJPEG stream from the host over HTTPS.</li>
+        <li>The Minecraft client owner shares an ephemeral link that expires in a couple of minutes.</li>
+        <li>This page validates the link and opens a direct MJPEG stream from the host.</li>
         <li>When the viewer disconnects or the link expires, the client capture shuts down automatically.</li>
       </ol>
       <p>
